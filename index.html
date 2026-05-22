@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <!-- 核心SEO标题：搜索结果显示的标题 -->
+    <title>3D粒子交互特效 - 手势控制HRT文字粒子动画 | 炫酷WebGL</title>
+    <!-- 核心SEO描述：搜索结果显示的介绍 -->
+    <meta name="description" content="在线3D粒子交互系统，支持摄像头手势控制，实时切换HRT文字粒子动画，基于Three.js与MediaPipe开发的炫酷WebGL视觉特效。">
+    <!-- 关键词 -->
+    <meta name="keywords" content="3D粒子,手势控制,WebGL,Three.js,粒子动画,HRT文字,视觉特效,网页特效">
+    <!-- 允许搜索引擎收录 -->
+    <meta name="robots" content="index,follow">
+    <!-- 适配移动端 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- 页面作者/主题 -->
+    <meta name="author" content="3D视觉特效">
+    <meta name="subject" content="3D粒子交互、手势控制文字动画">
+
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; }
+        #webcam { transform: scaleX(-1); position: fixed; top: 10px; left: 10px; width: 160px; height: 120px; border: 2px solid #555; z-index: 10; }
+        #three-canvas { width: 100vw; height: 100vh; display: block; }
+    </style>
+</head>
+<body>
+
+    <video id="webcam" autoplay playsinline></video>
+    <canvas id="three-canvas"></canvas>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lil-gui@0.19"></script>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // ==========================================
+        // 1. 初始化 Three.js 基础场景
+        // ==========================================
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 15; 
+
+        const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('three-canvas'), antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // ==========================================
+        // 2. 全局配置与状态变量
+        // ==========================================
+        const PARTICLE_COUNT = 3000; 
+        let particleGeometry, particlePoints;
+        
+        let targetPositions = { h: [], num2: [], num3: [] };
+        let activeTarget = null;
+
+        let gestureState = {
+            currentGesture: 1,
+            spreadFactor: 1.0,
+            smoothedSpread: 1.0
+        };
+
+        const guiConfig = {
+            particleColor: '#00ffff',
+            particleSize: 0.28,          
+            animationSpeed: 0.08,
+            maxSpread: 2.2,
+            minSpread: 0.5,
+            autoRotate: false,
+            rotateSpeed: 0.3
+        };
+
+        // ==========================================
+        // 3. 【核心黑科技】Canvas 二维像素点阵生成函数
+        // ==========================================
+        function createSolidPointsFromText(text) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 128;
+            canvas.height = 128;
+
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 90px Arial, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+
+            const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+            const validPixels = [];
+
+            for (let y = 0; y < canvas.height; y++) {
+                for (let x = 0; x < canvas.width; x++) {
+                    const alphaIdx = (y * canvas.width + x) * 4 + 3;
+                    const redIdx = (y * canvas.width + x) * 4;
+                    if (imgData[alphaIdx] > 128 && imgData[redIdx] > 200) {
+                        validPixels.push({
+                            x: (x - canvas.width / 2) * 0.12,
+                            y: -(y - canvas.height / 2) * 0.12
+                        });
+                    }
+                }
+            }
+
+            const pts = new Float32Array(PARTICLE_COUNT * 3);
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+                const pixel = validPixels[i % validPixels.length];
+                
+                pts[i3]     = pixel.x + (Math.random() - 0.5) * 0.05;
+                pts[i3 + 1] = pixel.y + (Math.random() - 0.5) * 0.05;
+                pts[i3 + 2] = (Math.random() - 0.5) * 0.05;
+            }
+            return pts;
+        }
+
+        // ==========================================
+        // 4. 初始化粒子系统
+        // ==========================================
+        function initSystem() {
+            targetPositions.h = createSolidPointsFromText('H');
+            targetPositions.num2 = createSolidPointsFromText('R');
+            targetPositions.num3 = createSolidPointsFromText('T');
+
+            activeTarget = targetPositions.h;
+
+            particleGeometry = new THREE.BufferGeometry();
+            const initialPositions = new Float32Array(PARTICLE_COUNT * 3);
+            for(let i=0; i<PARTICLE_COUNT*3; i++) {
+                initialPositions[i] = (Math.random() - 0.5) * 30;
+            }
+            particleGeometry.setAttribute('position', new THREE.BufferAttribute(initialPositions, 3));
+
+            const pCanvas = document.createElement('canvas');
+            pCanvas.width = 32;
+            pCanvas.height = 32;
+            const pCtx = pCanvas.getContext('2d');
+            const grad = pCtx.createRadialGradient(16,16,0, 16,16,16);
+            grad.addColorStop(0, 'rgba(255,255,255,1)');
+            grad.addColorStop(0.3, 'rgba(255,255,255,0.8)');
+            grad.addColorStop(1, 'rgba(255,255,255,0)');
+            pCtx.fillStyle = grad;
+            pCtx.fillRect(0,0,32,32);
+            const pTexture = new THREE.CanvasTexture(pCanvas);
+
+            const particleMaterial = new THREE.PointsMaterial({
+                color: guiConfig.particleColor,
+                size: guiConfig.particleSize,
+                map: pTexture,
+                transparent: true,
+                opacity: 0.9,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            particlePoints = new THREE.Points(particleGeometry, particleMaterial);
+            scene.add(particlePoints);
+
+            initGUI();
+            animate();
+            initMediaPipe();
+        }
+
+        // ==========================================
+        // 5. 初始化 MediaPipe
+        // ==========================================
+        function initMediaPipe() {
+            const videoElement = document.getElementById('webcam');
+            const hands = new Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            });
+
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 0,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            hands.onResults((results) => {
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    const landmarks = results.multiHandLandmarks[0];
+
+                    const p4 = landmarks[4];
+                    const p8 = landmarks[8];
+                    const distance = Math.sqrt(Math.pow(p4.x - p8.x, 2) + Math.pow(p4.y - p8.y, 2));
+                    
+                    gestureState.spreadFactor = THREE.MathUtils.mapLinear(
+                        distance, 0.04, 0.26, guiConfig.minSpread, guiConfig.maxSpread
+                    );
+
+                    const isIndexExtended = landmarks[8].y < landmarks[6].y;
+                    const isMiddleExtended = landmarks[12].y < landmarks[10].y;
+                    const isRingExtended = landmarks[16].y < landmarks[14].y;
+
+                    if (isIndexExtended && !isMiddleExtended && !isRingExtended) {
+                        gestureState.currentGesture = 1;
+                    } else if (isIndexExtended && isMiddleExtended && !isRingExtended) {
+                        gestureState.currentGesture = 2;
+                    } else if (isIndexExtended && isMiddleExtended && isRingExtended) {
+                        gestureState.currentGesture = 3;
+                    }
+                }
+            });
+
+            const cameraUtils = new Camera(videoElement, {
+                onFrame: async () => { await hands.send({ image: videoElement }); },
+                width: 160,
+                height: 120
+            });
+            cameraUtils.start();
+        }
+
+        // ==========================================
+        // 6. 调试面板
+        // ==========================================
+        function initGUI() {
+            const gui = new lil.GUI({ title: '高清像素粒子控制台' });
+            
+            const fMaterial = gui.addFolder('画面表现');
+            fMaterial.addColor(guiConfig, 'particleColor').name('发光颜色').onChange(v => particlePoints.material.color.set(v));
+            fMaterial.add(guiConfig, 'particleSize', 0.05, 0.8, 0.01).name('粒子粗细').onChange(v => particlePoints.material.size = v);
+
+            const fMotion = gui.addFolder('手势参数');
+            fMotion.add(guiConfig, 'animationSpeed', 0.02, 0.2, 0.01).name('聚集速度');
+            fMotion.add(guiConfig, 'minSpread', 0.1, 1.0, 0.05).name('捏合极值');
+            fMotion.add(guiConfig, 'maxSpread', 1.0, 4.0, 0.1).name('张开极值');
+            
+            const fScene = gui.addFolder('观察环境');
+            fScene.add(guiConfig, 'autoRotate').name('旋转展示');
+            fScene.add(guiConfig, 'rotateSpeed', 0.1, 2.0, 0.1).name('旋转速度');
+        }
+
+        // ==========================================
+        // 7. 渲染循环
+        // ==========================================
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = clock.getElapsedTime();
+
+            if (particleGeometry && activeTarget) {
+                if (gestureState.currentGesture === 1) activeTarget = targetPositions.h;
+                if (gestureState.currentGesture === 2) activeTarget = targetPositions.num2;
+                if (gestureState.currentGesture === 3) activeTarget = targetPositions.num3;
+
+                gestureState.smoothedSpread += (gestureState.spreadFactor - gestureState.smoothedSpread) * 0.1;
+
+                const positionAttribute = particleGeometry.attributes.position;
+                
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    const i3 = i * 3;
+
+                    let tX = activeTarget[i3] * gestureState.smoothedSpread;
+                    let tY = activeTarget[i3 + 1] * gestureState.smoothedSpread;
+                    let tZ = activeTarget[i3 + 2] * gestureState.smoothedSpread;
+
+                    tX += Math.sin(time * 1.2 + tY) * 0.04;
+                    tY += Math.cos(time * 1.2 + tX) * 0.04;
+
+                    positionAttribute.array[i3]     += (tX - positionAttribute.array[i3]) * guiConfig.animationSpeed;
+                    positionAttribute.array[i3 + 1] += (tY - positionAttribute.array[i3 + 1]) * guiConfig.animationSpeed;
+                    positionAttribute.array[i3 + 2] += (tZ - positionAttribute.array[i3 + 2]) * guiConfig.animationSpeed;
+                }
+
+                positionAttribute.needsUpdate = true;
+            }
+
+            if (guiConfig.autoRotate && particlePoints) {
+                particlePoints.rotation.y += 0.006 * guiConfig.rotateSpeed;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // 启动系统
+        initSystem();
+    </script>
+</body>
+</html>
